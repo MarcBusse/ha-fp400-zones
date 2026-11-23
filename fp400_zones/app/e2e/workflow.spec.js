@@ -138,6 +138,21 @@ test('rectangle tool draws and erase rectangle clears part of an area', async ({
     expect(errors).toEqual([]);
 });
 
+test('the fitted room view always includes drawn zones outside the traced outline', async ({page}) => {
+    const m = await mock(page);
+    const living = m.snapshot.devices.find((d) => d.ieee === 'sensor-a');
+    // A small traced outline near the sensor plus a saved zone in rows 12-13 (y 600..700), outside it.
+    living.profile = {completedAt: 1, room: {outline: [{x: -300, y: 0}, {x: 300, y: 0}, {x: 0, y: 150}]}};
+    const cells = '00'.repeat(24) + '0180' + '0180' + '00'.repeat(12);
+    living.layout = {zones: [{id: 1, name: 'Couch', enabled: true, cells}]};
+    m.send(m.snapshot);
+    await page.getByRole('link', {name: /Living room/}).click();
+    await expect(page.locator('#mapScale')).toContainText('7.0 × 7.5 m');
+    await page.getByRole('button', {name: 'Show full grid'}).click();
+    await expect(page.locator('#mapScale')).toContainText('8.0 × 10.0 m');
+    await expect(page.getByRole('button', {name: 'Fit room'})).toBeVisible();
+});
+
 test('mounting wizard starts from valid values when the sensor reports unknown settings', async ({page}) => {
     const m = await mock(page);
     const office = m.snapshot.devices.find((d) => d.ieee === 'sensor-b');
@@ -194,22 +209,6 @@ test('ceiling mounting traces behind the sensor and draws zones on the centred g
     expect(errors).toEqual([]);
 });
 
-test('the fitted room view always includes drawn zones outside the traced outline', async ({page}) => {
-    const m = await mock(page);
-    const living = m.snapshot.devices.find((d) => d.ieee === 'sensor-a');
-    living.state = {install_mode: 'ceiling', side_install: 'wall', install_height: 3500};
-    // A small outline traced before ceiling support, plus a saved zone in row 2 (y -400..-350) behind the sensor.
-    living.profile = {completedAt: 1, room: {outline: [{x: -300, y: 0}, {x: 300, y: 0}, {x: 0, y: 150}]}};
-    const cells = '00'.repeat(4) + '0180' + '00'.repeat(34);
-    living.layout = {zones: [{id: 1, name: 'Couch', enabled: true, cells}]};
-    m.send(m.snapshot);
-    m.send({type: 'state', ieee: 'sensor-a', state: living.state});
-    await page.getByRole('link', {name: /Living room/}).click();
-    await expect(page.locator('#mapScale')).toContainText('7.0 × 6.5 m · 50 cm cells · ceiling mount');
-    await page.getByRole('button', {name: 'Show full grid'}).click();
-    await expect(page.locator('#mapScale')).toContainText('8.0 × 10.0 m');
-});
-
 test('the map uses the last known ceiling mounting before the sensor reports again', async ({page}) => {
     const m = await mock(page);
     const living = m.snapshot.devices.find((d) => d.ieee === 'sensor-a');
@@ -242,4 +241,48 @@ test('ceiling height hint shows the distance error and asks to confirm unusual h
     page.once('dialog', (dialog) => dialog.accept());
     await page.getByRole('button', {name: 'Continue', exact: true}).click();
     await expect.poll(() => m.requests.find((r) => r.op === 'mounting')?.height).toBe(3500);
+});
+
+test('the fitted ceiling view always includes drawn zones behind the sensor', async ({page}) => {
+    const m = await mock(page);
+    const living = m.snapshot.devices.find((d) => d.ieee === 'sensor-a');
+    living.state = {install_mode: 'ceiling', side_install: 'wall', install_height: 3500};
+    // A small outline traced before ceiling support, plus a saved zone in row 2 (y -400..-350) behind the sensor.
+    living.profile = {completedAt: 1, room: {outline: [{x: -300, y: 0}, {x: 300, y: 0}, {x: 0, y: 150}]}};
+    const cells = '00'.repeat(4) + '0180' + '00'.repeat(34);
+    living.layout = {zones: [{id: 1, name: 'Couch', enabled: true, cells}]};
+    m.send(m.snapshot);
+    m.send({type: 'state', ieee: 'sensor-a', state: living.state});
+    await page.getByRole('link', {name: /Living room/}).click();
+    await expect(page.locator('#mapScale')).toContainText('7.0 × 6.5 m · 50 cm cells · ceiling mount');
+    await page.getByRole('button', {name: 'Show full grid'}).click();
+    await expect(page.locator('#mapScale')).toContainText('8.0 × 10.0 m');
+});
+
+test('the room view rotates in 90 degree steps and drawing follows the rotation', async ({page}) => {
+    const m = await mock(page);
+    await page.getByRole('link', {name: /Living room/}).click();
+    await page.getByRole('button', {name: /Create your first zone/}).click();
+    await page.getByRole('button', {name: 'Show full grid'}).click();
+    const rotate = page.getByRole('button', {name: /Rotate view/});
+    await expect(rotate).toHaveText('↻ Rotate view · 0°');
+    await rotate.click();
+    await expect(rotate).toHaveText('↻ Rotate view · 90°');
+    await expect.poll(() => m.requests.filter((r) => r.op === 'profile').at(-1)?.rotation).toBe(90);
+    // Turned a quarter, the 8 m wide wall grid is now 10 m wide on screen.
+    await expect(page.locator('#mapScale')).toContainText('10.0 × 8.0 m');
+    await page.locator('#map').scrollIntoViewIfNeeded();
+    const box = await page.locator('#map').boundingBox();
+    await page.getByRole('button', {name: 'Rectangle', exact: true}).click();
+    // Right edge of the turned view = far end of the wall grid (high rows).
+    await page.mouse.move(box.x + box.width * 0.88, box.y + box.height * 0.45); await page.mouse.down();
+    await page.mouse.move(box.x + box.width * 0.9, box.y + box.height * 0.55, {steps: 3}); await page.mouse.up();
+    const cells = await page.evaluate(() => JSON.parse(localStorage.getItem('fp400.v2.draft.sensor-a')).layout.zones[0].cells);
+    const rows = [...Array(320).keys()].filter((bit) => parseInt(cells.slice((bit >> 3) * 2, (bit >> 3) * 2 + 2), 16) & (128 >> (bit & 7))).map((bit) => bit >> 4);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(Math.min(...rows)).toBeGreaterThanOrEqual(15);
+    for (const degrees of [180, 270, 0]) {
+        await rotate.click();
+        await expect(rotate).toHaveText(`↻ Rotate view · ${degrees}°`);
+    }
 });

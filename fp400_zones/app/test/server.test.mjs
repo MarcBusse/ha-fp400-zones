@@ -200,6 +200,9 @@ test('automatic setup and layout saves wait for correlated Zigbee2MQTT replies',
     for (let i = 0; i < 20 && !subscribed.includes('zigbee2mqtt/Office'); i++) await delay(20);
     assert.ok(subscribed.includes('zigbee2mqtt/Office'));
     assert.equal((await requestAction(5, 'profile', {name: '  '})).ok, false);
+    assert.equal((await requestAction(12, 'profile', {rotation: 45})).ok, false);
+    assert.equal((await requestAction(13, 'profile', {rotation: 270})).ok, true);
+    assert.equal((await persisted()).profiles[ieee].rotation, 270);
     assert.equal((await requestAction(6, 'permitJoin')).ok, true);
     const known = {ieee_address: ieee, friendly_name: 'Office', model_id: 'lumi.models.4447_8295', interview_completed: true};
     const added = {ieee_address: '0x0000000000000002', friendly_name: 'New sensor', model_id: 'lumi.models.4447_8295', interview_completed: false};
@@ -225,12 +228,6 @@ test('snapshot reports the package version, responses carry security headers, ra
     const snapshot = JSON.parse(first);
     assert.equal(snapshot.type, 'snapshot');
     assert.equal(snapshot.version, pkg.version);
-    // Scripts and styles are requested under the current build so cached copies cannot be mixed in.
-    assert.match(snapshot.build, /^[0-9a-f]{12}$/);
-    assert.equal(page.headers.get('cache-control'), 'no-store');
-    const html = await page.text();
-    assert.ok(html.includes(`src="app.js?v=${snapshot.build}"`) && html.includes(`href="style.css?v=${snapshot.build}"`));
-    assert.ok((await (await fetch(`${origin}/app.js?v=${snapshot.build}`)).text()).includes(`from './model.js?v=${snapshot.build}'`));
     for (const [id, op] of [[1, 'set'], [2, 'get']]) {
         const reply = new Promise((resolve) => {
             const onMessage = (data) => {
@@ -244,4 +241,19 @@ test('snapshot reports the package version, responses carry security headers, ra
         ws.send(JSON.stringify({id, op, ieee: '0x0000000000000001', payload: {install_mode: 'wall'}}));
         assert.deepEqual(await reply, {type: 'result', id, ok: false, error: 'Invalid request'});
     }
+});
+
+test('UI assets are requested under the current build so cached copies cannot be mixed in', {timeout: 15000}, async (t) => {
+    const {port} = await start(t);
+    const origin = `http://127.0.0.1:${port}`;
+    const page = await fetch(origin);
+    assert.equal(page.headers.get('cache-control'), 'no-store');
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`, {origin});
+    t.after(() => ws.terminate());
+    const [first] = await once(ws, 'message');
+    const {build} = JSON.parse(first);
+    assert.match(build, /^[0-9a-f]{12}$/);
+    const html = await page.text();
+    assert.ok(html.includes(`src="app.js?v=${build}"`) && html.includes(`href="style.css?v=${build}"`));
+    assert.ok((await (await fetch(`${origin}/app.js?v=${build}`)).text()).includes(`from './model.js?v=${build}'`));
 });
